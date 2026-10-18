@@ -127,6 +127,10 @@ func ConfigDirPath() string {
 
 // ConfigDirPathE returns the config directory path or an error if home dir is unavailable.
 func ConfigDirPathE() (string, error) {
+	// Tests and isolated runs point the whole config/state/key dir elsewhere.
+	if dir := os.Getenv("CLAUDE_SYNC_CONFIG_DIR"); dir != "" {
+		return dir, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", ErrNoHomeDir
@@ -153,6 +157,9 @@ func ClaudeDir() string {
 
 // ClaudeDirE returns the Claude directory path or an error if home dir is unavailable.
 func ClaudeDirE() (string, error) {
+	if dir := os.Getenv("CLAUDE_SYNC_CLAUDE_DIR"); dir != "" {
+		return dir, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", ErrNoHomeDir
@@ -224,7 +231,7 @@ func Save(cfg *Config) error {
 	}
 
 	configPath := ConfigFilePath()
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
+	if err := WriteFileAtomic(configPath, data); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 

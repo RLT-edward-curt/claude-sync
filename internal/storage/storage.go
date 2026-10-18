@@ -52,6 +52,20 @@ type Storage interface {
 	BucketExists(ctx context.Context) (bool, error)
 }
 
+// ETagUploader is implemented by adapters that can return the stored object's
+// ETag from the upload itself (S3/R2). Others fall back to Head.
+type ETagUploader interface {
+	UploadETag(ctx context.Context, key string, data []byte) (string, error)
+}
+
+// NormalizeETag strips the quotes S3-compatible APIs put around ETags.
+func NormalizeETag(etag string) string {
+	if len(etag) >= 2 && etag[0] == '"' && etag[len(etag)-1] == '"' {
+		return etag[1 : len(etag)-1]
+	}
+	return etag
+}
+
 // New creates a new Storage instance based on the provided configuration
 func New(cfg *StorageConfig) (Storage, error) {
 	if err := cfg.Validate(); err != nil {

@@ -57,16 +57,22 @@ func New(cfg *storage.StorageConfig) (storage.Storage, error) {
 
 // Upload stores data with the given key
 func (c *Client) Upload(ctx context.Context, key string, data []byte) error {
-	_, err := c.client.PutObject(ctx, &s3.PutObjectInput{
+	_, err := c.UploadETag(ctx, key, data)
+	return err
+}
+
+// UploadETag stores data and returns the new object's ETag.
+func (c *Client) UploadETag(ctx context.Context, key string, data []byte) (string, error) {
+	out, err := c.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(c.bucket),
 		Key:         aws.String(key),
 		Body:        bytes.NewReader(data),
 		ContentType: aws.String("application/octet-stream"),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to upload %s: %w", key, err)
+		return "", fmt.Errorf("failed to upload %s: %w", key, err)
 	}
-	return nil
+	return storage.NormalizeETag(aws.ToString(out.ETag)), nil
 }
 
 // Download retrieves data for the given key

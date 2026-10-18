@@ -14,25 +14,48 @@ import (
 	"github.com/tawanorg/claude-sync/internal/config"
 )
 
+// StateSchema is the state.json schema written by v2. v1 files have no
+// schema field (0). v1 ignores unknown fields, so rollback to v1 still works.
+const StateSchema = 2
+
+// FileState is the last-synced baseline for one file. Hash is the sha256 of
+// the local file as last synced; RemoteETag is the remote object's ETag at
+// that moment. A sync compares the current local hash and the current remote
+// ETag (from the bucket listing) against this baseline; no clocks involved.
 type FileState struct {
-	Path     string    `json:"path"`
-	Hash     string    `json:"hash"`
-	Size     int64     `json:"size"`
-	ModTime  time.Time `json:"mod_time"`
-	Uploaded time.Time `json:"uploaded,omitempty"`
+	Path       string    `json:"path"`
+	Hash       string    `json:"hash"`
+	Size       int64     `json:"size"`
+	ModTime    time.Time `json:"mod_time"`
+	Uploaded   time.Time `json:"uploaded,omitempty"`
+	RemoteETag string    `json:"remote_etag,omitempty"`
+}
+
+// ConflictState records a keep-both conflict. While Copy exists on disk the
+// path is frozen: nothing is uploaded or downloaded for it.
+type ConflictState struct {
+	Copy    string    `json:"copy"`
+	Created time.Time `json:"created"`
 }
 
 type SyncState struct {
+	Schema   int                   `json:"schema,omitempty"`
 	Files    map[string]*FileState `json:"files"`
 	LastSync time.Time             `json:"last_sync"`
 	DeviceID string                `json:"device_id"`
 	LastPush time.Time             `json:"last_push,omitempty"`
 	LastPull time.Time             `json:"last_pull,omitempty"`
 
+	// Conflicts are frozen keep-both paths, keyed by local relative path.
+	Conflicts map[string]*ConflictState `json:"conflicts,omitempty"`
+
+	// TooLarge remembers files skipped for size, keyed by path, value = hash,
+	// so an unchanged oversized file is not recompressed on every sync.
+	TooLarge map[string]string `json:"too_large,omitempty"`
+
 	// MCPBaseline stores the last-synced normalized MCP server configs for three-way merge.
 	MCPBaseline json.RawMessage `json:"mcp_baseline,omitempty"`
 
-	// savePath is the custom path to save state to (if set)
 	savePath string     `json:"-"`
 	mu       sync.Mutex `json:"-"`
 }
@@ -56,101 +79,79 @@ func loadStateFromPath(statePath string) (*SyncState, error) {
 	data, err := os.ReadFile(statePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return NewState(), nil
+			s := NewState()
+			s.savePath = statePath
+			return s, nil
 		}
 		return nil, fmt.Errorf("failed to read state: %w", err)
 	}
 
 	var state SyncState
 	if err := json.Unmarshal(data, &state); err != nil {
-		// state.json is a regenerable sync cache (hashes, timestamps), not user
-		// config. A corrupt cache must never brick push/pull: back it up and start
-		// fresh so the next sync simply re-scans, without touching real config.
+		// state.json is a cache. A corrupt one is set aside and rebuilt from
+		// the bucket listing on the next sync.
 		backup := fmt.Sprintf("%s.corrupt-%d", statePath, time.Now().Unix())
 		if renameErr := os.Rename(statePath, backup); renameErr == nil {
-			fmt.Fprintf(os.Stderr, "Warning: state file was corrupt (%v); backed up to %s and starting fresh\n", err, backup)
-		} else {
-			fmt.Fprintf(os.Stderr, "Warning: state file was corrupt (%v); starting fresh\n", err)
+			fmt.Fprintf(os.Stderr, "Warning: state file was corrupt; moved to %s and rebuilding\n", backup)
 		}
-		return NewState(), nil
+		s := NewState()
+		s.savePath = statePath
+		return s, nil
 	}
-
 	if state.Files == nil {
 		state.Files = make(map[string]*FileState)
 	}
-
+	if state.Conflicts == nil {
+		state.Conflicts = make(map[string]*ConflictState)
+	}
+	if state.TooLarge == nil {
+		state.TooLarge = make(map[string]string)
+	}
+	state.savePath = statePath
 	return &state, nil
 }
 
 func NewState() *SyncState {
 	hostname, _ := os.Hostname()
 	return &SyncState{
-		Files:    make(map[string]*FileState),
-		DeviceID: hostname,
+		Schema:    StateSchema,
+		Files:     make(map[string]*FileState),
+		Conflicts: make(map[string]*ConflictState),
+		TooLarge:  make(map[string]string),
+		DeviceID:  hostname,
 	}
 }
 
+// Save writes state atomically (temp file + rename).
 func (s *SyncState) Save() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	statePath := s.savePath
 	if statePath == "" {
 		statePath = config.StateFilePath()
 	}
-
-	// Ensure directory exists
 	dir := filepath.Dir(statePath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create state directory: %w", err)
 	}
-
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to serialize state: %w", err)
 	}
-
-	// Write atomically: write to a temp file in the same directory, then rename.
-	// A crash or concurrent run mid-write can never leave a half-written/corrupt
-	// state.json this way (rename is atomic on the same filesystem).
-	tmp, err := os.CreateTemp(dir, ".state-*.tmp")
-	if err != nil {
-		return fmt.Errorf("failed to create temp state file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }() // no-op if rename succeeded
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("failed to write state: %w", err)
-	}
-	if err := tmp.Chmod(0600); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("failed to set state permissions: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("failed to flush state: %w", err)
-	}
-	if err := os.Rename(tmpPath, statePath); err != nil {
-		return fmt.Errorf("failed to write state: %w", err)
-	}
-
-	return nil
+	return writeFileAtomic(statePath, data, 0600)
 }
 
-func (s *SyncState) UpdateFile(relativePath string, info os.FileInfo, hash string) {
+// SetFile records a new baseline for relPath.
+func (s *SyncState) SetFile(relPath, hash string, size int64, mtime time.Time, etag string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.Files[relativePath] = &FileState{
-		Path:    relativePath,
-		Hash:    hash,
-		Size:    info.Size(),
-		ModTime: info.ModTime(),
-	}
-}
-
-func (s *SyncState) MarkUploaded(relativePath string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if f, ok := s.Files[relativePath]; ok {
-		f.Uploaded = time.Now()
+	s.Files[relPath] = &FileState{
+		Path:       relPath,
+		Hash:       hash,
+		Size:       size,
+		ModTime:    mtime,
+		Uploaded:   time.Now(),
+		RemoteETag: etag,
 	}
 }
 
@@ -207,143 +208,34 @@ func HashFile(path string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
-
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}
-
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func GetLocalFiles(claudeDir string, syncPaths []string, excludeFn ...func(string) bool) (map[string]os.FileInfo, error) {
-	files := make(map[string]os.FileInfo)
-
-	// Use the first exclude function if provided
-	var isExcluded func(string) bool
-	if len(excludeFn) > 0 && excludeFn[0] != nil {
-		isExcluded = excludeFn[0]
-	}
-
-	for _, syncPath := range syncPaths {
-		fullPath := filepath.Join(claudeDir, syncPath)
-
-		info, err := os.Stat(fullPath)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to stat %s: %w", syncPath, err)
-		}
-
-		if info.IsDir() {
-			err := filepath.Walk(fullPath, func(path string, fi os.FileInfo, err error) error {
-				if err != nil {
-					return err
-				}
-
-				relPath, _ := filepath.Rel(claudeDir, path)
-				// Normalize to forward slashes for consistent matching
-				relPath = filepath.ToSlash(relPath)
-
-				// Skip excluded directories entirely
-				if fi.IsDir() {
-					if isExcluded != nil && isExcluded(relPath) {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-				// Skip symlinks
-				if fi.Mode()&os.ModeSymlink != 0 {
-					return nil
-				}
-				// Skip excluded files
-				if isExcluded != nil && isExcluded(relPath) {
-					return nil
-				}
-
-				files[relPath] = fi
-				return nil
-			})
-			if err != nil {
-				return nil, fmt.Errorf("failed to walk %s: %w", syncPath, err)
-			}
-		} else {
-			// Skip symlinks
-			if info.Mode()&os.ModeSymlink != 0 {
-				continue
-			}
-			// Skip excluded files
-			if isExcluded != nil && isExcluded(syncPath) {
-				continue
-			}
-			files[syncPath] = info
-		}
-	}
-
-	return files, nil
-}
-
-type FileChange struct {
-	Path      string
-	Action    string // "add", "modify", "delete"
-	LocalHash string
-	LocalSize int64
-	LocalTime time.Time
-}
-
-func (s *SyncState) DetectChanges(claudeDir string, syncPaths []string, excludeFn ...func(string) bool) ([]FileChange, error) {
-	var changes []FileChange
-
-	localFiles, err := GetLocalFiles(claudeDir, syncPaths, excludeFn...)
+// writeFileAtomic writes data to a temp file in the same directory and renames
+// it over path. On Windows the rename fails if another process holds the
+// target open; the caller reports that and retries next sync.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".claude-sync-tmp-*")
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	// Check for new or modified files
-	for relPath, info := range localFiles {
-		fullPath := filepath.Join(claudeDir, relPath)
-		hash, err := HashFile(fullPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to hash %s: %w", relPath, err)
-		}
-
-		existing := s.GetFile(relPath)
-		if existing == nil {
-			changes = append(changes, FileChange{
-				Path:      relPath,
-				Action:    "add",
-				LocalHash: hash,
-				LocalSize: info.Size(),
-				LocalTime: info.ModTime(),
-			})
-		} else if existing.Hash != hash {
-			changes = append(changes, FileChange{
-				Path:      relPath,
-				Action:    "modify",
-				LocalHash: hash,
-				LocalSize: info.Size(),
-				LocalTime: info.ModTime(),
-			})
-		}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
 	}
-
-	// Check for deleted files - snapshot keys under lock to avoid race condition
-	s.mu.Lock()
-	knownPaths := make([]string, 0, len(s.Files))
-	for relPath := range s.Files {
-		knownPaths = append(knownPaths, relPath)
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
 	}
-	s.mu.Unlock()
-
-	for _, relPath := range knownPaths {
-		if _, exists := localFiles[relPath]; !exists {
-			changes = append(changes, FileChange{
-				Path:   relPath,
-				Action: "delete",
-			})
-		}
+	if err := tmp.Close(); err != nil {
+		return err
 	}
-
-	return changes, nil
+	return os.Rename(tmpPath, path)
 }
