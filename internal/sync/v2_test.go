@@ -542,6 +542,22 @@ func TestCrossOSCodeSessions(t *testing.T) {
 	}
 }
 
+// Transcripts a v1 Windows machine uploaded carry raw Windows paths; every
+// machine rewrites Code paths to its own on download.
+func TestV1WindowsUploadsRewrittenOnDownload(t *testing.T) {
+	mac := NewPathMapperFor("/Users/edwardcurt", false)
+	in := []byte(`{"cwd":"C:\\Users\\edward.curt\\Code\\app","f":"C:\\Users\\edward.curt\\Code\\app\\a.ts","o":"C:\\Users\\edward.curt\\Desktop"}`)
+	out := string(mac.ResolveContent("projects/x/s.jsonl", in))
+	want := `{"cwd":"/Users/edwardcurt/Code/app","f":"/Users/edwardcurt/Code/app/a.ts","o":"C:\\Users\\edward.curt\\Desktop"}`
+	if out != want {
+		t.Fatalf("got  %s\nwant %s", out, want)
+	}
+	win := NewPathMapperFor(`C:\Users\edward.curt`, true)
+	if got := string(win.ResolveContent("projects/x/s.jsonl", in)); got != string(in) {
+		t.Fatalf("windows should see its own paths unchanged:\n%s", got)
+	}
+}
+
 func TestRepairWindowsV1Damage(t *testing.T) {
 	b := newBucket(t)
 	win := newMachine(t, b, `C:\Users\edward.curt`, true)

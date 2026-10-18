@@ -63,7 +63,18 @@ const segChars = `[^\\/"'\s<>|*?:\x00-\x1f]`
 var (
 	resolveCodeRe = regexp.MustCompile(regexp.QuoteMeta(homeToken+"/"+CodeDir) + `((?:/` + segChars + `*)*)`)
 	nameCharRe    = regexp.MustCompile(`^[A-Za-z0-9_.-]`)
+
+	// Any Windows user's Code folder, as v1 uploaded it from a Windows machine
+	// without normalizing (JSON-escaped or forward slashes; plain backslashes
+	// in text files). Rewritten to ${HOME}/Code on download on every machine.
+	foreignWinCodeJSON = foreignWinCode(`\\`)
+	foreignWinCodeText = foreignWinCode(`\`)
 )
+
+func foreignWinCode(sep string) *regexp.Regexp {
+	s := `(?:` + regexp.QuoteMeta(sep) + `|/)`
+	return regexp.MustCompile(`(?i)\b[A-Z]:` + s + `Users` + s + `[^\\/"'\s<>|*?:]+` + s + CodeDir + `((?:` + s + segChars + `*)*)`)
+}
 
 // NewPathMapper builds the mapper for this machine.
 func NewPathMapper(homeDir string) *PathMapper {
@@ -220,12 +231,16 @@ func (m *PathMapper) ResolveContent(relPath string, data []byte) []byte {
 	if m == nil || !IsPortableContentPath(relPath) {
 		return data
 	}
+	sep, foreign := `\`, foreignWinCodeText
+	if isJSONPath(relPath) {
+		sep, foreign = `\\`, foreignWinCodeJSON
+	}
+	data = replaceCode(foreign, data, func(rest []byte) []byte {
+		rest = bytes.ReplaceAll(rest, []byte(sep), []byte("/"))
+		return append([]byte(homeToken+"/"+CodeDir), rest...)
+	})
 	if !m.windows {
 		return bytes.ReplaceAll(data, []byte(homeToken), []byte(m.home))
-	}
-	sep := `\`
-	if isJSONPath(relPath) {
-		sep = `\\`
 	}
 	nativeHome := []byte(strings.ReplaceAll(m.home, `\`, sep))
 	data = replaceCode(resolveCodeRe, data, func(rest []byte) []byte {
