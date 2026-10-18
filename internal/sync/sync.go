@@ -866,7 +866,7 @@ func (s *Syncer) resolve(ctx context.Context, it Item, manifest *FileManifest, r
 
 	switch rules.ClassOf(it.Path) {
 	case rules.History:
-		merged := unionLines(localData, remoteData)
+		merged := MergeHistory(localData, remoteData)
 		if err := s.writeLocal(it.Path, merged, "", nil); err != nil {
 			return err
 		}
@@ -929,24 +929,6 @@ func (s *Syncer) resolve(ctx context.Context, it Item, manifest *FileManifest, r
 
 func conflictCopyName(relPath string) string {
 	return relPath + ".conflict-remote-" + time.Now().Format("20060102-150405")
-}
-
-// unionLines merges two JSONL files: every distinct non-empty line from both,
-// local order first, then remote-only lines.
-func unionLines(local, remote []byte) []byte {
-	seen := make(map[string]bool)
-	var out bytes.Buffer
-	for _, src := range [][]byte{local, remote} {
-		for _, line := range bytes.Split(src, []byte("\n")) {
-			if len(bytes.TrimSpace(line)) == 0 || seen[string(line)] {
-				continue
-			}
-			seen[string(line)] = true
-			out.Write(line)
-			out.WriteByte('\n')
-		}
-	}
-	return out.Bytes()
 }
 
 // ---------------------------------------------------------------------------

@@ -119,9 +119,10 @@ func loadSyncer() (*config.Config, *sync.Syncer, error) {
 	if err != nil {
 		return nil, nil, errors.New("no config on this machine; run `claude-sync setup`")
 	}
-	if cfg.HasV1Rules() {
-		fmt.Println("note: sync_paths/exclude in config.yaml are ignored (rules are built in); `claude-sync migrate` removes them.")
-	}
+	// v1 sync_paths/exclude are deliberately left in config.yaml during the
+	// rollout and ignored here: if a v1 binary still runs on this machine, it
+	// keeps using them instead of falling back to v1 defaults (which would
+	// delete remote hooks/, memory/, scripts/ ... and upload plugins/).
 	s, err := sync.NewSyncer(cfg, !verbose)
 	return cfg, s, err
 }
@@ -553,10 +554,7 @@ func migrateCmd() *cobra.Command {
 				}
 			}
 			if cfg.HasV1Rules() {
-				if _, err := config.StripV1Rules(); err != nil {
-					return fmt.Errorf("could not update config.yaml: %w", err)
-				}
-				fmt.Println("removed per-machine sync_paths/exclude from config.yaml (rules are built in now)")
+				fmt.Println("config.yaml: v1 sync_paths/exclude left in place for any old binary; v2 ignores them (rules are built in)")
 			}
 			_, s, err := loadSyncer()
 			if err != nil {

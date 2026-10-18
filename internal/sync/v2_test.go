@@ -583,6 +583,17 @@ func TestRepairWindowsV1Damage(t *testing.T) {
 	}
 }
 
+func TestMergeHistoryNoDuplicatePrompts(t *testing.T) {
+	local := []byte(`{"display":"fix it","pastedContents":{},"timestamp":1000,"project":"p","sessionId":"s"}` + "\n")
+	// Same prompt as reconstructed on the other machine: different bytes.
+	remote := []byte(`{"display":"fix it","pastedContents":null,"timestamp":1400,"project":"p","sessionId":"s"}` + "\n" +
+		`{"display":"new one","timestamp":5000,"project":"p","sessionId":"s"}` + "\n")
+	got := string(MergeHistory(local, remote))
+	if strings.Count(got, "fix it") != 1 || !strings.Contains(got, "new one") {
+		t.Fatalf("merge wrong:\n%s", got)
+	}
+}
+
 func TestPathMapperBoundaries(t *testing.T) {
 	m := NewPathMapperFor(`C:\Users\edward.curt`, true)
 	in := []byte(`{"a":"C:\\Users\\edward.curt\\Codex\\y","b":"C:\\Users\\edward.curtis\\z","c":"c:/users/edward.curt/Code/q"}`)

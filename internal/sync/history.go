@@ -2,6 +2,7 @@ package sync
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -423,4 +424,40 @@ func forEachLine(r io.Reader, fn func(line []byte)) error {
 			break
 		}
 	}
+}
+
+// MergeHistory merges two versions of history.jsonl after both machines
+// changed it. Every local line is kept; a remote line is added unless the
+// same prompt (session + display within historyDedupeWindowMs) is already
+// present, the same rule RebuildHistory uses, so merges never duplicate
+// prompts. The caller rebuilds and sorts afterwards.
+func MergeHistory(local, remote []byte) []byte {
+	type sig struct{ session, display string }
+	seen := make(map[sig][]int64)
+	exact := make(map[string]bool)
+	var out bytes.Buffer
+	add := func(line []byte, fromRemote bool) {
+		if len(bytes.TrimSpace(line)) == 0 || exact[string(line)] {
+			return
+		}
+		var e HistoryEntry
+		parsed := json.Unmarshal(line, &e) == nil
+		if parsed && e.Display != "" {
+			k := sig{e.SessionID, e.Display}
+			if fromRemote && withinWindow(seen[k], e.Timestamp) {
+				return
+			}
+			seen[k] = append(seen[k], e.Timestamp)
+		}
+		exact[string(line)] = true
+		out.Write(line)
+		out.WriteByte('\n')
+	}
+	for _, l := range bytes.Split(local, []byte("\n")) {
+		add(l, false)
+	}
+	for _, l := range bytes.Split(remote, []byte("\n")) {
+		add(l, true)
+	}
+	return out.Bytes()
 }
