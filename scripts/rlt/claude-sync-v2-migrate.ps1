@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 
 $Version = '2.0.0-rlt.1'
 $Url = "https://github.com/RLT-edward-curt/claude-sync/releases/download/v$Version/claude-sync-windows-amd64.exe"
-$Sha = '89de2c2c2826080fc01751ec0e3fdd34e8023b77a7481d679fc3d2923026db97'
+$Sha = '554b6c1ecbe8d8d09db9c12a262e3bd2ada0f02f749a24ff9c2570bb342170b3'
 $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\claude-sync'
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 

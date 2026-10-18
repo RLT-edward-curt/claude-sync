@@ -13,8 +13,8 @@ set -euo pipefail
 
 VERSION="2.0.0-rlt.1"
 BASE="https://github.com/RLT-edward-curt/claude-sync/releases/download/v${VERSION}"
-SHA_ARM64="4eecf126bfae1171087b7488e06f1f4b9356411fdfbae69931b1c13037176acc"
-SHA_AMD64="c3e36bb353296d242c274873e1daff30368f07602ed89332097eba781ed954c0"
+SHA_ARM64="3b30aa9608e03df1546aa0d987addc7b2934939fba4e3dee0ff68b573c319bee"
+SHA_AMD64="f55db746403dfcf8fa88de1418da9a92eec5ad9d84cd00bc4f72e8ea9a18d7f5"
 
 PLAN_ONLY=0
 [ "${1:-}" = "--plan-only" ] && PLAN_ONLY=1
