@@ -116,7 +116,7 @@ Two thin wrappers in `~/.claude/scripts/`; all real logic is in the Go binary so
 Each one:
 1. Finds the current `claude-sync` (`command -v` / `Get-Command`; handles an npm `.cmd` shim on Windows) and backs it up beside itself.
 2. Downloads the release asset for this OS/arch, verifies the pinned SHA256, installs it in the same place (Windows: `%LOCALAPPDATA%\Programs\claude-sync\claude-sync.exe` and prepends that to the user PATH if the old one was a shim).
-3. Runs `claude-sync migrate`: backs up `config.yaml` and `state.json` into `~/.claude-sync/backups/` (never into `~/.claude`), strips `sync_paths`/`exclude`/`scope`, proves the key against the bucket, upgrades `state.json` to schema 2 (seeding ETags from the LIST where the hash already matches).
+3. Runs `claude-sync migrate`: backs up `config.yaml` and `state.json` into `~/.claude-sync/backups/` (never into `~/.claude`), leaves `sync_paths`/`exclude` in place during rollout (v2 ignores them; a stray v1 run then behaves as before instead of falling back to upstream defaults and deleting remote files), proves the key against the bucket, upgrades `state.json` to schema 2 (seeding ETags from the LIST where the hash already matches).
 4. Runs `claude-sync plan`, prints the counts, and asks y/N before the first `claude-sync`.
 
 Rollback: restore the backed-up binary and `config.yaml`; v1 still reads the bucket because nothing in the layout changed.
