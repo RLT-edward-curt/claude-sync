@@ -72,6 +72,10 @@ func New(cfg *StorageConfig) (Storage, error) {
 		return nil, fmt.Errorf("invalid storage config: %w", err)
 	}
 
+	// The RLT build registers only the R2 and S3 adapters.
+	if (cfg.Provider == ProviderGCS && NewGCS == nil) || (cfg.Provider == ProviderWebDAV && NewWebDAV == nil) {
+		return nil, fmt.Errorf("storage provider %s is not included in this build", cfg.Provider)
+	}
 	switch cfg.Provider {
 	case ProviderR2:
 		return NewR2(cfg)

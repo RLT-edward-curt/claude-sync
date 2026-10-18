@@ -24,10 +24,8 @@ import (
 	"github.com/tawanorg/claude-sync/internal/storage"
 	"github.com/tawanorg/claude-sync/internal/sync"
 
-	_ "github.com/tawanorg/claude-sync/internal/storage/gcs"
 	_ "github.com/tawanorg/claude-sync/internal/storage/r2"
 	_ "github.com/tawanorg/claude-sync/internal/storage/s3"
-	_ "github.com/tawanorg/claude-sync/internal/storage/webdav"
 )
 
 var (
