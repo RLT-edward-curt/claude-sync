@@ -15,10 +15,10 @@ Prerequisite: whatever fragment/config work is in progress on the PC is finished
 
 ```powershell
 New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude\scripts" | Out-Null
-Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/RLT-edward-curt/claude-sync/v2.0.0-rlt.1/scripts/rlt/claude-sync-v2-migrate.ps1" -OutFile "$env:USERPROFILE\.claude\scripts\claude-sync-v2-migrate.ps1"
+Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/RLT-edward-curt/claude-sync/a6c7f83abf69597f212fdfc53395b08ab38aacfc/scripts/rlt/claude-sync-v2-migrate.ps1" -OutFile "$env:USERPROFILE\.claude\scripts\claude-sync-v2-migrate.ps1"
 (Get-FileHash -Algorithm SHA256 "$env:USERPROFILE\.claude\scripts\claude-sync-v2-migrate.ps1").Hash
 ```
-Expected hash: `7ED1A06C7D4DA0DC132537B68C458E42F3492F7D329EFD6A003E3CA1B4CFD141`. Stop if different.
+Expected hash: `C2CCA82919C925CCEBC6FA72A201BD01D2A2662076DA8D18A3FE7259E73D0BBC`. Stop if different.
 
 ## Step 2: install + migrate + read-only plan (no transfers)
 
