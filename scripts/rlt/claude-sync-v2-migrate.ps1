@@ -1,4 +1,4 @@
-# claude-sync v2 migration for Windows (PowerShell 5.1+). Version 20261018-v1.0.
+# claude-sync v2 migration for Windows (PowerShell 5.1+). Version 20261019-v1.1.
 #
 # Installs the RLT claude-sync v2 binary (hash-pinned GitHub release), upgrades
 # this machine's v1 config and state with `claude-sync migrate`, and shows the
@@ -35,22 +35,24 @@ if ($existing -and $existing.Source -like '*.exe' -and $existing.Source -notlike
 if (Test-V2 $target) {
     Write-Output "claude-sync $Version already installed at $target"
 } else {
-    $tmp = Join-Path $env:TEMP "claude-sync-$Stamp.exe"
+    # Download next to the target, not into %TEMP%: TEMP is often an 8.3 short
+    # path (C:\Users\EDWARD~1.CUR\...) that Move-Item in PowerShell 5.1 rejects.
+    New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
+    $tmp = "$target.download-$Stamp"
     Write-Output 'downloading claude-sync-windows-amd64.exe ...'
     Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $tmp
-    $got = (Get-FileHash -Algorithm SHA256 -Path $tmp).Hash.ToLower()
+    $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $tmp).Hash.ToLower()
     if ($got -ne $Sha) {
-        Remove-Item $tmp -Force
+        Remove-Item -LiteralPath $tmp -Force
         throw "checksum mismatch (got $got); nothing installed"
     }
-    Unblock-File -Path $tmp
-    New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
-    if (Test-Path $target) {
+    Unblock-File -LiteralPath $tmp
+    if (Test-Path -LiteralPath $target) {
         $backup = "$target.v1-backup-$Stamp"
-        Copy-Item $target $backup
+        Copy-Item -LiteralPath $target -Destination $backup
         Write-Output "backed up old binary -> $backup"
     }
-    Move-Item -Force $tmp $target
+    Move-Item -LiteralPath $tmp -Destination $target -Force
     Write-Output "installed $target"
 }
 
