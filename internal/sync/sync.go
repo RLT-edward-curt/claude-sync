@@ -1,10 +1,14 @@
 package sync
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +23,7 @@ import (
 	"github.com/tawanorg/claude-sync/internal/crypto"
 	"github.com/tawanorg/claude-sync/internal/rules"
 	"github.com/tawanorg/claude-sync/internal/storage"
+	"golang.org/x/sync/semaphore"
 
 	// Register storage adapters
 	_ "github.com/tawanorg/claude-sync/internal/storage/r2"
@@ -71,7 +76,27 @@ type Syncer struct {
 	paths     *PathMapper
 	device    string
 	quiet     bool
+
+	// Progress, if set, receives long-running stage updates ("scan",
+	// "repair"); total is 0 when unknown. Calls are throttled by the caller.
+	Progress func(stage string, done, total int)
 }
+
+func (s *Syncer) report(stage string, done, total int) {
+	if s.Progress != nil {
+		s.Progress(stage, done, total)
+	}
+}
+
+// memBudget bounds how many bytes of file data concurrent transfers may hold
+// in memory at once (each transfer weighs about 3x its file size: the file,
+// its path-normalized copy and the compressed/encrypted object).
+const memBudget = 768 << 20
+
+// MaxLocalBytes: local files larger than this are skipped as too large
+// without being read; jsonl compresses about 10x, so anything bigger cannot
+// fit under rules.MaxUploadBytes anyway.
+const MaxLocalBytes = 1 << 30
 
 // NewSyncer builds a syncer from the loaded config.
 func NewSyncer(cfg *config.Config, quiet bool) (*Syncer, error) {
@@ -395,6 +420,7 @@ func (s *Syncer) scanLocal() (map[string]*localFile, error) {
 			return nil
 		}
 		lf := &localFile{Size: fi.Size(), ModTime: fi.ModTime(), Mode: fi.Mode().Perm()}
+		s.report("scan", len(out)+1, 0)
 		if b := s.state.GetFile(rel); b != nil && b.Size == lf.Size && b.ModTime.Equal(lf.ModTime) && b.Hash != "" {
 			lf.Hash = b.Hash
 		} else {
@@ -551,6 +577,7 @@ func (s *Syncer) Execute(ctx context.Context, plan *Plan, opts Options) (*Result
 	total := len(work)
 	done := 0
 	sem := make(chan struct{}, defaultWorkers)
+	mem := semaphore.NewWeighted(memBudget)
 	var wg sync.WaitGroup
 	tombsCleared := make(map[string]bool)
 	for _, it := range work {
@@ -559,6 +586,25 @@ func (s *Syncer) Execute(ctx context.Context, plan *Plan, opts Options) (*Result
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			var size int64
+			if it.Local != nil {
+				size = it.Local.Size
+			}
+			if it.Remote != nil && it.Remote.Size*8 > size {
+				size = it.Remote.Size * 8 // compressed: plaintext is larger
+			}
+			weight := size * 3
+			if weight > memBudget {
+				weight = memBudget
+			}
+			if weight < 1 {
+				weight = 1
+			}
+			if err := mem.Acquire(ctx, weight); err != nil {
+				addErr(it.Path, err)
+				return
+			}
+			defer mem.Release(weight)
 			var err error
 			switch it.Action {
 			case ActUpload:
@@ -740,13 +786,23 @@ func (s *Syncer) putObject(ctx context.Context, key string, data []byte) (string
 // encrypted object would exceed rules.MaxUploadBytes.
 func (s *Syncer) upload(ctx context.Context, relPath string) (tooBig bool, err error) {
 	full := filepath.Join(s.claudeDir, filepath.FromSlash(relPath))
-	data, err := os.ReadFile(full)
-	if err != nil {
-		return false, fmt.Errorf("read: %w", err)
-	}
 	info, err := os.Stat(full)
 	if err != nil {
 		return false, err
+	}
+	if info.Size() > MaxLocalBytes {
+		h, err := HashFile(full)
+		if err != nil {
+			return false, err
+		}
+		s.state.mu.Lock()
+		s.state.TooLarge[relPath] = h
+		s.state.mu.Unlock()
+		return true, nil
+	}
+	data, err := os.ReadFile(full)
+	if err != nil {
+		return false, fmt.Errorf("read: %w", err)
 	}
 	hash := hashBytes(data)
 	enc, err := s.encode(relPath, data)
@@ -1052,6 +1108,10 @@ func (s *Syncer) VerifyKey(ctx context.Context) (empty bool, err error) {
 // RepairWindowsTranscripts fixes JSON lines v1 corrupted on Windows (see
 // PathMapper.RepairWindowsJSON). Baselines are moved to the repaired hash so
 // the repair is not uploaded as a change. Returns files and lines fixed.
+//
+// Files are streamed line by line, so memory stays at one line however large
+// the transcript. State is saved every 200 repaired files so an interrupted
+// run loses nothing.
 func (s *Syncer) RepairWindowsTranscripts() (files, lines int, err error) {
 	if s.paths == nil || !s.paths.windows {
 		return 0, 0, nil
@@ -1060,34 +1120,141 @@ func (s *Syncer) RepairWindowsTranscripts() (files, lines int, err error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	valid := func(b []byte) bool { return json.Valid(bytes.TrimRight(b, "\r")) }
-	for p, lf := range local {
-		if !IsPortableContentPath(p) || !isJSONPath(p) {
-			continue
+	var todo []string
+	for p := range local {
+		if IsPortableContentPath(p) && isJSONPath(p) {
+			todo = append(todo, p)
 		}
+	}
+	sort.Strings(todo)
+	for i, p := range todo {
+		s.report("repair", i+1, len(todo))
+		lf := local[p]
 		full := filepath.Join(s.claudeDir, filepath.FromSlash(p))
-		data, err := os.ReadFile(full)
-		if err != nil {
-			continue
-		}
-		fixed, n := s.paths.RepairWindowsJSON(p, data, valid)
-		if n == 0 {
-			continue
-		}
-		if err := writeFileAtomic(full, fixed, lf.Mode); err != nil {
-			continue // in use; next migrate run or download will fix it
+		n, newHash, rerr := s.repairFile(p, full, lf.Mode)
+		if rerr != nil || n == 0 {
+			continue // unreadable or in use: the next migrate run retries
 		}
 		files++
 		lines += n
 		if b := s.state.GetFile(p); b != nil && b.Hash == lf.Hash {
-			fi, _ := os.Stat(full)
-			if fi != nil {
-				s.state.SetFile(p, hashBytes(fixed), fi.Size(), fi.ModTime(), b.RemoteETag)
+			if fi, _ := os.Stat(full); fi != nil {
+				s.state.SetFile(p, newHash, fi.Size(), fi.ModTime(), b.RemoteETag)
+				s.state.mu.Lock()
 				s.state.Files[p].Uploaded = b.Uploaded
+				s.state.mu.Unlock()
+			}
+		}
+		if files%200 == 0 {
+			if err := s.state.Save(); err != nil {
+				return files, lines, err
 			}
 		}
 	}
 	return files, lines, s.state.Save()
+}
+
+// repairFile streams one JSONL file. A first pass looks for a damaged line
+// (contains the raw home path and is not valid JSON); only then is a second
+// pass written to a temp file and renamed over the original.
+func (s *Syncer) repairFile(rel, full string, mode os.FileMode) (fixed int, newHash string, err error) {
+	raw := []byte(s.paths.home)
+	valid := func(b []byte) bool { return json.Valid(bytes.TrimRight(b, "\r")) }
+	damaged := func(line []byte) bool { return bytes.Contains(line, raw) && !valid(line) }
+
+	need := false
+	if err := eachLine(full, func(line []byte) bool {
+		if damaged(line) {
+			need = true
+			return false
+		}
+		return true
+	}); err != nil || !need {
+		return 0, "", err
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(full), ".claude-sync-tmp-*")
+	if err != nil {
+		return 0, "", err
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	h := sha256.New()
+	w := bufio.NewWriterSize(io.MultiWriter(tmp, h), 1<<20)
+	err = eachLineRaw(full, func(line []byte, eol bool) error {
+		out := line
+		if damaged(line) {
+			if cand, n := s.paths.RepairWindowsJSON(rel, line, valid); n > 0 {
+				out = cand
+				fixed++
+			}
+		}
+		if _, err := w.Write(out); err != nil {
+			return err
+		}
+		if eol {
+			return w.WriteByte('\n')
+		}
+		return nil
+	})
+	if err == nil {
+		err = w.Flush()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil || fixed == 0 {
+		return 0, "", err
+	}
+	_ = os.Chmod(tmpPath, mode)
+	if err := os.Rename(tmpPath, full); err != nil {
+		return 0, "", err
+	}
+	return fixed, hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// eachLine calls fn for each line (without the newline) until fn returns false.
+func eachLine(path string, fn func(line []byte) bool) error {
+	stop := errors.New("stop")
+	err := eachLineRaw(path, func(line []byte, _ bool) error {
+		if !fn(line) {
+			return stop
+		}
+		return nil
+	})
+	if err == stop {
+		return nil
+	}
+	return err
+}
+
+// eachLineRaw streams a file line by line. eol reports whether the line was
+// terminated by '\n' (so the file can be rewritten byte for byte).
+func eachLineRaw(path string, fn func(line []byte, eol bool) error) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	r := bufio.NewReaderSize(f, 1<<20)
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 {
+			eol := line[len(line)-1] == '\n'
+			if eol {
+				line = line[:len(line)-1]
+			}
+			if ferr := fn(line, eol); ferr != nil {
+				return ferr
+			}
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

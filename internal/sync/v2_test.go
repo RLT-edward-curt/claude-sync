@@ -583,6 +583,33 @@ func TestRepairWindowsV1Damage(t *testing.T) {
 	}
 }
 
+// Large transcripts are repaired by streaming; untouched lines stay byte for
+// byte, including a final line without a newline.
+func TestRepairStreamsLargeFile(t *testing.T) {
+	b := newBucket(t)
+	win := newMachine(t, b, `C:\Users\edward.curt`, true)
+	var sb strings.Builder
+	big := strings.Repeat("x", 1<<20)
+	for i := 0; i < 40; i++ {
+		sb.WriteString(`{"blob":"` + big + `"}` + "\n")
+	}
+	sb.WriteString(`{"cwd":"C:\Users\edward.curt/Code/app"}` + "\n")
+	sb.WriteString(`{"tail":"no newline"}`)
+	rel := "projects/C--Users-edward-curt-Code-app/big.jsonl"
+	win.write(rel, sb.String())
+	files, lines, err := win.s.RepairWindowsTranscripts()
+	if err != nil || files != 1 || lines != 1 {
+		t.Fatalf("files=%d lines=%d err=%v", files, lines, err)
+	}
+	got := win.read(rel)
+	if !strings.HasSuffix(got, `{"cwd":"C:\\Users\\edward.curt\\Code\\app"}`+"\n"+`{"tail":"no newline"}`) {
+		t.Fatalf("tail wrong: %q", got[len(got)-80:])
+	}
+	if len(got) != sb.Len()+4 { // 2 raw separators become 4 escaped ones
+		t.Fatalf("size changed unexpectedly: %d vs %d", len(got), sb.Len())
+	}
+}
+
 func TestMergeHistoryNoDuplicatePrompts(t *testing.T) {
 	local := []byte(`{"display":"fix it","pastedContents":{},"timestamp":1000,"project":"p","sessionId":"s"}` + "\n")
 	// Same prompt as reconstructed on the other machine: different bytes.

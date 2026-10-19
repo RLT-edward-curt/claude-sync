@@ -1,5 +1,5 @@
 #!/bin/bash
-# claude-sync v2 migration for macOS. Version 20261018-v1.0.
+# claude-sync v2 migration for macOS. Version 20261019-v2.0.
 #
 # Installs the RLT claude-sync v2 binary (hash-pinned GitHub release), upgrades
 # this machine's v1 config and state with `claude-sync migrate`, and shows the
@@ -11,10 +11,10 @@
 #   bash ~/.claude/scripts/claude-sync-v2-migrate.sh
 set -euo pipefail
 
-VERSION="2.0.0-rlt.1"
+VERSION="2.0.0-rlt.2"
 BASE="https://github.com/RLT-edward-curt/claude-sync/releases/download/v${VERSION}"
-SHA_ARM64="7015a8b68635b9ff30d4c0871cf9f2c2c9131f0ca22616104745922219258c40"
-SHA_AMD64="1de700477fc52eff9bbd29c12a8f7b46d6ecb3b593498012a7cb258c61cf377e"
+SHA_ARM64="75aa128a23c85ad26cb17786fcc3e22cd751a9298428ba5f8e20685e9f161d44"
+SHA_AMD64="e8931e4d23026e58ba893b1bbc54a19353a1db281c40fff4a8408dc758456f82"
 
 PLAN_ONLY=0
 [ "${1:-}" = "--plan-only" ] && PLAN_ONLY=1
@@ -24,6 +24,16 @@ case "$(uname -m)" in
   x86_64) ASSET="claude-sync-darwin-amd64"; SHA="$SHA_AMD64" ;;
   *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
+
+# No other claude-sync may be running; clear a lock left by a crashed run.
+if pgrep -x claude-sync >/dev/null 2>&1; then
+  echo "claude-sync is already running (pgrep -x claude-sync); wait for it to finish" >&2
+  exit 1
+fi
+if [ -f "$HOME/.claude-sync/sync.lock" ]; then
+  rm -f "$HOME/.claude-sync/sync.lock"
+  echo "removed a lock file left by an earlier run that did not finish"
+fi
 
 # Where to install: replace the claude-sync currently on PATH, else Homebrew bin.
 TARGET="$(command -v claude-sync || true)"
@@ -46,7 +56,7 @@ else
   fi
   chmod 755 "$WORK/claude-sync"
   if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
-    BACKUP="${TARGET}.v1-backup-$(date +%Y%m%d-%H%M%S)"
+    BACKUP="${TARGET}.backup-$(date +%Y%m%d-%H%M%S)"
     cp -L "$TARGET" "$BACKUP"
     echo "backed up old binary -> $BACKUP"
     rm -f "$TARGET" # replaces a symlink itself instead of writing through it

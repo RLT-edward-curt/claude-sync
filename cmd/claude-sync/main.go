@@ -10,9 +10,13 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
+	gosync "sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -34,6 +38,7 @@ var (
 )
 
 func main() {
+	crashLog()
 	var confirmDeletes int
 	root := &cobra.Command{
 		Use:   "claude-sync",
@@ -122,7 +127,51 @@ func loadSyncer() (*config.Config, *sync.Syncer, error) {
 	// keeps using them instead of falling back to v1 defaults (which would
 	// delete remote hooks/, memory/, scripts/ ... and upload plugins/).
 	s, err := sync.NewSyncer(cfg, !verbose)
+	if s != nil {
+		s.Progress = progressPrinter()
+	}
 	return cfg, s, err
+}
+
+// progressPrinter prints a stage update to stderr at most every 3 seconds.
+func progressPrinter() func(stage string, done, total int) {
+	var last time.Time
+	var mu gosync.Mutex
+	return func(stage string, done, total int) {
+		mu.Lock()
+		defer mu.Unlock()
+		if time.Since(last) < 3*time.Second && !(total > 0 && done == total) {
+			return
+		}
+		last = time.Now()
+		switch {
+		case stage == "scan":
+			fmt.Fprintf(os.Stderr, "  scanning ~/.claude: %d files\n", done)
+		case total > 0:
+			fmt.Fprintf(os.Stderr, "  %s: %d/%d files\n", stage, done, total)
+		default:
+			fmt.Fprintf(os.Stderr, "  %s: %d\n", stage, done)
+		}
+	}
+}
+
+// crashLog sends Go runtime crash output (panics, out of memory) to
+// ~/.claude-sync/logs/crash.log as well as the terminal, so a crash on a
+// remote machine can be diagnosed afterwards. It never contains config.
+func crashLog() {
+	dir := filepath.Join(config.ConfigDirPath(), "logs")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "crash.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return
+	}
+	if fi, err := f.Stat(); err == nil && fi.Size() > 4<<20 {
+		_ = f.Truncate(0)
+	}
+	fmt.Fprintf(f, "--- %s claude-sync %s %s/%s args=%v\n", time.Now().Format(time.RFC3339), version, runtime.GOOS, runtime.GOARCH, os.Args[1:])
+	_ = debug.SetCrashOutput(f, debug.CrashOptions{})
 }
 
 // ---------------------------------------------------------------------------
@@ -563,6 +612,10 @@ func migrateCmd() *cobra.Command {
 			if _, err := s.VerifyKey(ctx); err != nil {
 				return err
 			}
+			fmt.Println("key OK")
+			if runtime.GOOS == "windows" {
+				fmt.Println("checking transcripts for damage from v1 on Windows (progress every few seconds)...")
+			}
 			files, lines, err := s.RepairWindowsTranscripts()
 			if err != nil {
 				return err
@@ -574,6 +627,7 @@ func migrateCmd() *cobra.Command {
 			if err := s.GetState().Save(); err != nil {
 				return err
 			}
+			fmt.Println("building the plan (lists the bucket, scans ~/.claude)...")
 			p, err := s.BuildPlan(ctx)
 			if err != nil {
 				return err
