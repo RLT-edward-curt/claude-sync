@@ -15,10 +15,10 @@ Prerequisite: whatever fragment/config work is in progress on the PC is finished
 
 ```powershell
 New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude\scripts" | Out-Null
-Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/RLT-edward-curt/claude-sync/a6c7f83abf69597f212fdfc53395b08ab38aacfc/scripts/rlt/claude-sync-v2-migrate.ps1" -OutFile "$env:USERPROFILE\.claude\scripts\claude-sync-v2-migrate.ps1"
+Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/RLT-edward-curt/claude-sync/v2.0.0-rlt.2/scripts/rlt/claude-sync-v2-migrate.ps1" -OutFile "$env:USERPROFILE\.claude\scripts\claude-sync-v2-migrate.ps1"
 (Get-FileHash -Algorithm SHA256 "$env:USERPROFILE\.claude\scripts\claude-sync-v2-migrate.ps1").Hash
 ```
-Expected hash: `C2CCA82919C925CCEBC6FA72A201BD01D2A2662076DA8D18A3FE7259E73D0BBC`. Stop if different.
+Expected hash: `FA712DB07D76AC6F0BFF97245957FD6D7E0843F34207E65B700B90285F12DA7D`. Stop if different.
 
 ## Step 2: install + migrate + read-only plan (no transfers)
 
@@ -59,11 +59,11 @@ The old exe (if any) is backed up as `<path>.v1-backup-<timestamp>`; config/stat
 In a terminal on the Studio (one command per line):
 
 ```bash
-curl -fsSL -o ~/.claude/scripts/claude-sync-v2-migrate.sh https://raw.githubusercontent.com/RLT-edward-curt/claude-sync/v2.0.0-rlt.1/scripts/rlt/claude-sync-v2-migrate.sh
+curl -fsSL -o ~/.claude/scripts/claude-sync-v2-migrate.sh https://raw.githubusercontent.com/RLT-edward-curt/claude-sync/v2.0.0-rlt.2/scripts/rlt/claude-sync-v2-migrate.sh
 shasum -a 256 ~/.claude/scripts/claude-sync-v2-migrate.sh
 bash ~/.claude/scripts/claude-sync-v2-migrate.sh --plan-only
 claude-sync
 claude-sync plan
 ```
-Expected shasum: `97cda87a141b4d3404c63f4b8f3ff15a424dda9782e7cea6823cf0066b24240a`. Stop if different,
+Expected shasum: `fdc6494798e5926d78dd8296c1016f23683f350137d1e168240d517741a6a20d`. Stop if different,
 and review the plan counts before the bare `claude-sync`.
